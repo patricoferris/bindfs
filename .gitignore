@@ -49,6 +49,7 @@ tests/internals/*.trs
 
 # Vagrant
 
+.vagrant
 vagrant/*/*.log
 vagrant/*/.vagrant
 
