@@ -81,7 +81,7 @@
 #ifdef __linux__
 #include <sys/mman.h>
 #include <fcntl.h>
-#include <linux/fs.h>  // For BLKGETSIZE64
+#include <linux/fs.h> // For BLKGETSIZE64
 
 #ifndef O_DIRECT
 #define O_DIRECT 00040000 /* direct disk access hint */
@@ -97,38 +97,42 @@
 #include "rate_limiter.h"
 #include "userinfo.h"
 #include "usermap.h"
+#include "uidmap.h"
 
 /* Apple Structs */
 #ifdef __APPLE__
 #include <sys/param.h>
-#define G_PREFIX   "org"
+#include "uidmap.h"
+#define G_PREFIX "org"
 #define G_KAUTH_FILESEC_XATTR G_PREFIX ".apple.system.Security"
-#define A_PREFIX   "com"
+#define A_PREFIX "com"
 #define A_KAUTH_FILESEC_XATTR A_PREFIX ".apple.system.Security"
-#define XATTR_APPLE_PREFIX   "com.apple."
+#define XATTR_APPLE_PREFIX "com.apple."
 
 // Yes, Apple asks us to copy/paste these -.-
-#define   LOCK_SH   1    /* shared lock */
-#define   LOCK_EX   2    /* exclusive lock */
-#define   LOCK_NB   4    /* don't block when locking */
-#define   LOCK_UN   8    /* unlock */
+#define LOCK_SH 1 /* shared lock */
+#define LOCK_EX 2 /* exclusive lock */
+#define LOCK_NB 4 /* don't block when locking */
+#define LOCK_UN 8 /* unlock */
 int flock(int fd, int operation);
 #endif
 
 /* We pessimistically assume signed uid_t and gid_t in our overflow checks,
    mostly because supporting both cases would require a bunch more code. */
-static const uid_t UID_T_MAX = ((1LL << (sizeof(uid_t)*8-1)) - 1);
-static const gid_t GID_T_MAX = ((1LL << (sizeof(gid_t)*8-1)) - 1);
+static const uid_t UID_T_MAX = ((1LL << (sizeof(uid_t) * 8 - 1)) - 1);
+static const gid_t GID_T_MAX = ((1LL << (sizeof(gid_t) * 8 - 1)) - 1);
 static const int UID_GID_OVERFLOW_ERRNO = EIO;
 
 /* SETTINGS */
-static struct Settings {
+static struct Settings
+{
     const char *progname;
     struct permchain *permchain; /* permission bit rules. see permchain.h */
-    uid_t new_uid; /* user-specified uid */
-    gid_t new_gid; /* user-specified gid */
+    uid_t new_uid;               /* user-specified uid */
+    gid_t new_gid;               /* user-specified gid */
     uid_t create_for_uid;
     gid_t create_for_gid;
+    int map_to_calling_user; /* Map calls to /Users/$USER/<path> */
     char *mntsrc;
     char *mntdest;
     int mntdest_len; /* caches strlen(mntdest) */
@@ -143,26 +147,30 @@ static struct Settings {
     RateLimiter *read_limiter;
     RateLimiter *write_limiter;
 
-    enum CreatePolicy {
+    enum CreatePolicy
+    {
         CREATE_AS_USER,
         CREATE_AS_MOUNTER
     } create_policy;
 
     struct permchain *create_permchain; /* the --create-with-perms option */
 
-    enum ChownPolicy {
+    enum ChownPolicy
+    {
         CHOWN_NORMAL,
         CHOWN_IGNORE,
         CHOWN_DENY
     } chown_policy;
 
-    enum ChgrpPolicy {
+    enum ChgrpPolicy
+    {
         CHGRP_NORMAL,
         CHGRP_IGNORE,
         CHGRP_DENY
     } chgrp_policy;
 
-    enum ChmodPolicy {
+    enum ChmodPolicy
+    {
         CHMOD_NORMAL,
         CHMOD_IGNORE,
         CHMOD_DENY
@@ -172,7 +180,8 @@ static struct Settings {
 
     struct permchain *chmod_permchain; /* the --chmod-filter option */
 
-    enum XAttrPolicy {
+    enum XAttrPolicy
+    {
         XATTR_UNIMPLEMENTED,
         XATTR_READ_ONLY,
         XATTR_READ_WRITE
@@ -192,7 +201,8 @@ static struct Settings {
 
     int block_devices_as_files;
 
-    enum ResolvedSymlinkDeletion {
+    enum ResolvedSymlinkDeletion
+    {
         RESOLVED_SYMLINK_DELETION_DENY,
         RESOLVED_SYMLINK_DELETION_SYMLINK_ONLY,
         RESOLVED_SYMLINK_DELETION_SYMLINK_FIRST,
@@ -217,8 +227,6 @@ static struct Settings {
 
 } settings;
 
-
-
 /* PROTOTYPES */
 
 static int is_mirroring_enabled();
@@ -233,7 +241,7 @@ static char *process_path(const char *path, bool resolve_symlinks);
 static int getattr_common(const char *path, struct stat *stbuf);
 
 /* Chowns a new file if necessary. */
-static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown_func)(const char*, uid_t, gid_t));
+static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown_func)(const char *, uid_t, gid_t));
 
 /* Unified implementation of unlink and rmdir. */
 static int delete_file(const char *path, int (*target_delete_func)(const char *));
@@ -287,12 +295,11 @@ static int bindfs_release(const char *path, struct fuse_file_info *fi);
 static int bindfs_fsync(const char *path, int isdatasync,
                         struct fuse_file_info *fi);
 
-
 static void print_usage(const char *progname);
 
 static int process_option(void *data, const char *arg, int key,
                           struct fuse_args *outargs);
-static int parse_mirrored_users(char* mirror);
+static int parse_mirrored_users(char *mirror);
 static int parse_user_map(UserMap *map, UserMap *reverse_map, char *spec);
 static char *get_working_dir();
 static void maybe_stdout_stderr_to_file();
@@ -311,23 +318,27 @@ static int is_mirroring_enabled()
 static int is_mirrored_user(uid_t uid)
 {
     int i;
-    for (i = 0; i < settings.num_mirrored_users; ++i) {
-        if (settings.mirrored_users[i] == uid) {
+    for (i = 0; i < settings.num_mirrored_users; ++i)
+    {
+        if (settings.mirrored_users[i] == uid)
+        {
             return 1;
         }
     }
-    for (i = 0; i < settings.num_mirrored_members; ++i) {
-        if (user_belongs_to_group(uid, settings.mirrored_members[i])) {
+    for (i = 0; i < settings.num_mirrored_members; ++i)
+    {
+        if (user_belongs_to_group(uid, settings.mirrored_members[i]))
+        {
             return 1;
         }
     }
     return 0;
 }
 
-
 static char *process_path(const char *path, bool resolve_symlinks)
 {
-    if (path == NULL) { /* possible? */
+    if (path == NULL)
+    { /* possible? */
         errno = EINVAL;
         return NULL;
     }
@@ -338,15 +349,20 @@ static char *process_path(const char *path, bool resolve_symlinks)
     if (*path == '\0')
         path = ".";
 
-    if (resolve_symlinks && settings.resolve_symlinks) {
-        char* result = realpath(path, NULL);
-        if (result == NULL) {
-            if (errno == ENOENT) {
+    if (resolve_symlinks && settings.resolve_symlinks)
+    {
+        char *result = realpath(path, NULL);
+        if (result == NULL)
+        {
+            if (errno == ENOENT)
+            {
                 /* Broken symlink (or missing file). Don't return null because
                    we want to be able to operate on broken symlinks. */
                 return strdup(path);
             }
-        } else if (strncmp(result, settings.mntdest, settings.mntdest_len) == 0) {
+        }
+        else if (strncmp(result, settings.mntdest, settings.mntdest_len) == 0)
+        {
             /* Recursive call. We cannot handle this without deadlocking,
                especially in single-threaded mode. */
             DPRINTF("Denying recursive access to mountpoint `%s'", result);
@@ -355,7 +371,30 @@ static char *process_path(const char *path, bool resolve_symlinks)
             return NULL;
         }
         return result;
-    } else {
+    }
+    else
+    {
+        if (settings.map_to_calling_user)
+        {
+            char result[100];
+            strcpy(result, "/Users/");
+            struct fuse_context *fc = fuse_get_context();
+            char *username = get_user(fc->uid);
+            if (strncmp(username, "root", strlen("root")) == 0)
+            {
+                DPRINTF("Denying `%s'", username);
+                errno = EPERM;
+                return NULL;
+                // return strdup("/Users/patrickferris/local");
+            }
+            strcat(result, username);
+            strcat(result, "/");
+            strcat(result, path);
+            DPRINTF("Denying `%s'", result);
+            errno = EPERM;
+            return NULL;
+            return strdup(result);
+        }
         return strdup(path);
     }
 }
@@ -367,7 +406,8 @@ static int getattr_common(const char *procpath, struct stat *stbuf)
     /* Copy mtime (file content modification time)
        to ctime (inode/status change time)
        if the user asked for that */
-    if (settings.ctime_from_mtime) {
+    if (settings.ctime_from_mtime)
+    {
 #ifdef HAVE_STAT_NANOSEC
         // TODO: does this work on OS X?
         stbuf->st_ctim = stbuf->st_mtim;
@@ -380,10 +420,12 @@ static int getattr_common(const char *procpath, struct stat *stbuf)
     stbuf->st_uid = usermap_get_uid_or_default(settings.usermap, stbuf->st_uid, stbuf->st_uid);
     stbuf->st_gid = usermap_get_gid_or_default(settings.usermap, stbuf->st_gid, stbuf->st_gid);
 
-    if (!apply_uid_offset(&stbuf->st_uid)) {
+    if (!apply_uid_offset(&stbuf->st_uid))
+    {
         return -UID_GID_OVERFLOW_ERRNO;
     }
-    if (!apply_gid_offset(&stbuf->st_gid)) {
+    if (!apply_gid_offset(&stbuf->st_gid))
+    {
         return -UID_GID_OVERFLOW_ERRNO;
     }
 
@@ -394,35 +436,43 @@ static int getattr_common(const char *procpath, struct stat *stbuf)
         stbuf->st_gid = settings.new_gid;
 
     /* Mirrored user? */
-    if (is_mirroring_enabled() && is_mirrored_user(fc->uid)) {
+    if (is_mirroring_enabled() && is_mirrored_user(fc->uid))
+    {
         stbuf->st_uid = fc->uid;
-    } else if (settings.mirrored_users_only && fc->uid != 0) {
+    }
+    else if (settings.mirrored_users_only && fc->uid != 0)
+    {
         stbuf->st_mode &= ~0777; /* Deny all access if mirror-only and not root */
         return 0;
     }
 
     /* Hide hard links */
-    if (settings.hide_hard_links) {
+    if (settings.hide_hard_links)
+    {
         stbuf->st_nlink = 1;
     }
 
     /* Block files as regular files. */
-    if (settings.block_devices_as_files && S_ISBLK(stbuf->st_mode)) {
-        stbuf->st_mode ^= S_IFBLK | S_IFREG;  // Flip both bits
+    if (settings.block_devices_as_files && S_ISBLK(stbuf->st_mode))
+    {
+        stbuf->st_mode ^= S_IFBLK | S_IFREG; // Flip both bits
         int fd = open(procpath, O_RDONLY);
 #ifdef __linux__
         uint64_t size;
         ioctl(fd, BLKGETSIZE64, &size);
         stbuf->st_size = (off_t)size;
-        if (stbuf->st_size < 0) {  // Underflow
+        if (stbuf->st_size < 0)
+        { // Underflow
             return -EOVERFLOW;
         }
 #else
-        if (fd == -1) {
+        if (fd == -1)
+        {
             return -errno;
         }
         off_t size = lseek(fd, 0, SEEK_END);
-        if (size == (off_t)-1) {
+        if (size == (off_t)-1)
+        {
             close(fd);
             return -errno;
         }
@@ -432,12 +482,14 @@ static int getattr_common(const char *procpath, struct stat *stbuf)
     }
 
     /* Then permission bits. Symlink permissions don't matter, though. */
-    if ((stbuf->st_mode & S_IFLNK) != S_IFLNK) {
+    if ((stbuf->st_mode & S_IFLNK) != S_IFLNK)
+    {
         /* Apply user-defined permission bit modifications */
         stbuf->st_mode = permchain_apply(settings.permchain, stbuf->st_mode);
 
         /* Check that we can really do what we promise if --realistic-permissions was given */
-        if (settings.realistic_permissions) {
+        if (settings.realistic_permissions)
+        {
             if (access(procpath, R_OK) == -1)
                 stbuf->st_mode &= ~0444;
             if (access(procpath, W_OK) == -1)
@@ -452,12 +504,13 @@ static int getattr_common(const char *procpath, struct stat *stbuf)
 
 /* FIXME: another thread may race to see the old owner before the chown is done.
           Is there a scenario where this compromises security? Or application correctness? */
-static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown_func)(const char*, uid_t, gid_t))
+static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown_func)(const char *, uid_t, gid_t))
 {
     uid_t file_owner;
     gid_t file_group;
 
-    if (settings.create_policy == CREATE_AS_USER) {
+    if (settings.create_policy == CREATE_AS_USER)
+    {
         char *path_copy;
         const char *dir_path;
         struct stat stbuf;
@@ -470,7 +523,9 @@ static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown
         if (lstat(dir_path, &stbuf) != -1 && stbuf.st_mode & S_ISGID)
             file_group = -1;
         free(path_copy);
-    } else {
+    }
+    else
+    {
         file_owner = -1;
         file_group = -1;
     }
@@ -478,14 +533,18 @@ static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown
     file_owner = usermap_get_uid_or_default(settings.usermap_reverse, fc->uid, file_owner);
     file_group = usermap_get_gid_or_default(settings.usermap_reverse, fc->gid, file_group);
 
-    if (file_owner != (uid_t)-1) {
-        if (!unapply_uid_offset(&file_owner)) {
-           return -UID_GID_OVERFLOW_ERRNO;
+    if (file_owner != (uid_t)-1)
+    {
+        if (!unapply_uid_offset(&file_owner))
+        {
+            return -UID_GID_OVERFLOW_ERRNO;
         }
     }
 
-    if (file_group != (gid_t)-1) {
-        if (!unapply_gid_offset(&file_group)) {
+    if (file_group != (gid_t)-1)
+    {
+        if (!unapply_gid_offset(&file_group))
+        {
             return -UID_GID_OVERFLOW_ERRNO;
         }
     }
@@ -495,8 +554,10 @@ static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown
     if (settings.create_for_gid != -1)
         file_group = settings.create_for_gid;
 
-    if ((file_owner != -1) || (file_group != -1)) {
-        if (chown_func(path, file_owner, file_group) == -1) {
+    if ((file_owner != -1) || (file_group != -1))
+    {
+        if (chown_func(path, file_owner, file_group) == -1)
+        {
             DPRINTF("Failed to chown new file or directory (%d)", errno);
         }
     }
@@ -504,29 +565,34 @@ static int chown_new_file(const char *path, struct fuse_context *fc, int (*chown
     return 0;
 }
 
-static int delete_file(const char *path, int (*target_delete_func)(const char *)) {
+static int delete_file(const char *path, int (*target_delete_func)(const char *))
+{
     int res;
     char *real_path;
     struct stat st;
     char *also_try_delete = NULL;
     char *unlink_first = NULL;
-    int (*main_delete_func)(const char*) = target_delete_func;
+    int (*main_delete_func)(const char *) = target_delete_func;
 
-     if (settings.delete_deny)
+    if (settings.delete_deny)
         return -EPERM;
 
     real_path = process_path(path, false);
     if (real_path == NULL)
         return -errno;
 
-    if (settings.resolve_symlinks) {
-        if (lstat(real_path, &st) == -1) {
+    if (settings.resolve_symlinks)
+    {
+        if (lstat(real_path, &st) == -1)
+        {
             free(real_path);
             return -errno;
         }
 
-        if (S_ISLNK(st.st_mode)) {
-            switch(settings.resolved_symlink_deletion_policy) {
+        if (S_ISLNK(st.st_mode))
+        {
+            switch (settings.resolved_symlink_deletion_policy)
+            {
             case RESOLVED_SYMLINK_DELETION_DENY:
                 free(real_path);
                 return -EPERM;
@@ -537,22 +603,26 @@ static int delete_file(const char *path, int (*target_delete_func)(const char *)
                 main_delete_func = &unlink;
 
                 also_try_delete = realpath(real_path, NULL);
-                if (also_try_delete == NULL && errno != ENOENT) {
+                if (also_try_delete == NULL && errno != ENOENT)
+                {
                     free(real_path);
                     return -errno;
                 }
                 break;
             case RESOLVED_SYMLINK_DELETION_TARGET_FIRST:
                 unlink_first = realpath(real_path, NULL);
-                if (unlink_first == NULL && errno != ENOENT) {
+                if (unlink_first == NULL && errno != ENOENT)
+                {
                     free(real_path);
                     return -errno;
                 }
 
-                if (unlink_first != NULL) {
+                if (unlink_first != NULL)
+                {
                     res = unlink(unlink_first);
                     free(unlink_first);
-                    if (res == -1) {
+                    if (res == -1)
+                    {
                         free(real_path);
                         return -errno;
                     }
@@ -564,12 +634,14 @@ static int delete_file(const char *path, int (*target_delete_func)(const char *)
 
     res = main_delete_func(real_path);
     free(real_path);
-    if (res == -1) {
+    if (res == -1)
+    {
         free(also_try_delete);
         return -errno;
     }
 
-    if (also_try_delete != NULL) {
+    if (also_try_delete != NULL)
+    {
         (void)target_delete_func(also_try_delete);
         free(also_try_delete);
     }
@@ -577,8 +649,10 @@ static int delete_file(const char *path, int (*target_delete_func)(const char *)
     return 0;
 }
 
-static int apply_uid_offset(uid_t *uid) {
-    if (*uid > UID_T_MAX - settings.uid_offset) {
+static int apply_uid_offset(uid_t *uid)
+{
+    if (*uid > UID_T_MAX - settings.uid_offset)
+    {
         DPRINTF("UID %lld overflowed while applying offset", (long long)*uid);
         return 0;
     }
@@ -586,8 +660,10 @@ static int apply_uid_offset(uid_t *uid) {
     return 1;
 }
 
-static int apply_gid_offset(gid_t *gid) {
-    if (*gid > GID_T_MAX - settings.gid_offset) {
+static int apply_gid_offset(gid_t *gid)
+{
+    if (*gid > GID_T_MAX - settings.gid_offset)
+    {
         DPRINTF("GID %lld overflowed while applying offset", (long long)*gid);
         return 0;
     }
@@ -595,8 +671,10 @@ static int apply_gid_offset(gid_t *gid) {
     return 1;
 }
 
-static int unapply_uid_offset(uid_t *uid) {
-    if (*uid < settings.uid_offset) {
+static int unapply_uid_offset(uid_t *uid)
+{
+    if (*uid < settings.uid_offset)
+    {
         DPRINTF("UID %lld underflowed while unapplying offset", (long long)*uid);
         return 0;
     }
@@ -604,8 +682,10 @@ static int unapply_uid_offset(uid_t *uid) {
     return 1;
 }
 
-static int unapply_gid_offset(gid_t *gid) {
-  if (*gid < settings.gid_offset) {
+static int unapply_gid_offset(gid_t *gid)
+{
+    if (*gid < settings.gid_offset)
+    {
         DPRINTF("GID %lld underflowed while unapplying offset", (long long)*gid);
         return 0;
     }
@@ -621,7 +701,8 @@ static size_t round_up_buffer_size_for_direct_io(size_t size)
     // See also: Pull Request #74
     size_t alignment = settings.odirect_alignment;
     size_t rem = size % alignment;
-    if (rem == 0) {
+    if (rem == 0)
+    {
         return size;
     }
     return size - rem + alignment;
@@ -635,13 +716,13 @@ static void *bindfs_init()
 
     maybe_stdout_stderr_to_file();
 
-    if (fchdir(settings.mntsrc_fd) != 0) {
+    if (fchdir(settings.mntsrc_fd) != 0)
+    {
         fprintf(
             stderr,
             "Could not change working directory to '%s': %s\n",
             settings.mntsrc,
-            strerror(errno)
-            );
+            strerror(errno));
         fuse_exit(fuse_get_context()->fuse);
     }
 
@@ -661,7 +742,8 @@ static int bindfs_getattr(const char *path, struct stat *stbuf)
     if (real_path == NULL)
         return -errno;
 
-    if (lstat(real_path, stbuf) == -1) {
+    if (lstat(real_path, stbuf) == -1)
+    {
         free(real_path);
         return -errno;
     }
@@ -681,7 +763,8 @@ static int bindfs_fgetattr(const char *path, struct stat *stbuf,
     if (real_path == NULL)
         return -errno;
 
-    if (fstat(fi->fh, stbuf) == -1) {
+    if (fstat(fi->fh, stbuf) == -1)
+    {
         free(real_path);
         return -errno;
     }
@@ -716,21 +799,26 @@ static int bindfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                           off_t offset, struct fuse_file_info *fi)
 {
     char *real_path = process_path(path, true);
-    if (real_path == NULL) {
+    if (real_path == NULL)
+    {
         return -errno;
     }
 
     DIR *dp = opendir(real_path);
-    if (dp == NULL) {
+    if (dp == NULL)
+    {
         free(real_path);
         return -errno;
     }
 
     long pc_ret = pathconf(real_path, _PC_NAME_MAX);
-    if (pc_ret < 0) {
+    if (pc_ret < 0)
+    {
         DPRINTF("pathconf failed: %s (%d)", strerror(errno), errno);
         pc_ret = NAME_MAX;
-    } else if (pc_ret == 0) {
+    }
+    else if (pc_ret == 0)
+    {
         // Workaround for some source filesystems erroneously returning 0
         // (see issue #54).
         pc_ret = NAME_MAX;
@@ -738,7 +826,8 @@ static int bindfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
     // Path buffer for resolving symlinks
     struct memory_block resolve_buf = MEMORY_BLOCK_INITIALIZER;
-    if (settings.resolve_symlinks) {
+    if (settings.resolve_symlinks)
+    {
         int len = strlen(real_path);
         append_to_memory_block(&resolve_buf, real_path, len + 1);
         resolve_buf.ptr[len] = '/';
@@ -748,11 +837,14 @@ static int bindfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     real_path = NULL;
 
     int result = 0;
-    while (1) {
+    while (1)
+    {
         errno = 0;
         struct dirent *de = readdir(dp);
-        if (de == NULL) {
-            if (errno != 0) {
+        if (de == NULL)
+        {
+            if (errno != 0)
+            {
                 result = -errno;
             }
             break;
@@ -763,14 +855,17 @@ static int bindfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         st.st_ino = de->d_ino;
         st.st_mode = de->d_type << 12;
 
-        if (settings.resolve_symlinks && (st.st_mode & S_IFLNK) == S_IFLNK) {
-            int file_len = strlen(de->d_name) + 1;  // (include null terminator)
+        if (settings.resolve_symlinks && (st.st_mode & S_IFLNK) == S_IFLNK)
+        {
+            int file_len = strlen(de->d_name) + 1; // (include null terminator)
             append_to_memory_block(&resolve_buf, de->d_name, file_len);
             char *resolved = realpath(resolve_buf.ptr, NULL);
             resolve_buf.size -= file_len;
 
-            if (resolved) {
-                if (lstat(resolved, &st) == -1) {
+            if (resolved)
+            {
+                if (lstat(resolved, &st) == -1)
+                {
                     result = -errno;
                     break;
                 }
@@ -785,13 +880,15 @@ static int bindfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         // consider it an error if it does. It is undocumented whether it sets
         // errno in that case, so we zero it first and set it ourself if it
         // doesn't.
-        if (filler(buf, de->d_name, &st, 0) != 0) {
+        if (filler(buf, de->d_name, &st, 0) != 0)
+        {
             result = errno != 0 ? -errno : -EIO;
             break;
         }
     }
 
-    if (settings.resolve_symlinks) {
+    if (settings.resolve_symlinks)
+    {
         free_memory_block(&resolve_buf);
     }
 
@@ -815,7 +912,8 @@ static int bindfs_mknod(const char *path, mode_t mode, dev_t rdev)
         res = mkfifo(real_path, mode);
     else
         res = mknod(real_path, mode, rdev);
-    if (res == -1) {
+    if (res == -1)
+    {
         free(real_path);
         return -errno;
     }
@@ -841,7 +939,8 @@ static int bindfs_mkdir(const char *path, mode_t mode)
     mode = permchain_apply(settings.create_permchain, mode);
 
     res = mkdir(real_path, mode & 0777);
-    if (res == -1) {
+    if (res == -1)
+    {
         free(real_path);
         return -errno;
     }
@@ -877,7 +976,8 @@ static int bindfs_symlink(const char *from, const char *to)
         return -errno;
 
     res = symlink(from, real_to);
-    if (res == -1) {
+    if (res == -1)
+    {
         free(real_to);
         return -errno;
     }
@@ -902,7 +1002,8 @@ static int bindfs_rename(const char *from, const char *to)
         return -errno;
 
     real_to = process_path(to, true);
-    if (real_to == NULL) {
+    if (real_to == NULL)
+    {
         free(real_from);
         return -errno;
     }
@@ -926,7 +1027,8 @@ static int bindfs_link(const char *from, const char *to)
         return -errno;
 
     real_to = process_path(to, true);
-    if (real_to == NULL) {
+    if (real_to == NULL)
+    {
         free(real_from);
         return -errno;
     }
@@ -951,33 +1053,40 @@ static int bindfs_chmod(const char *path, mode_t mode)
     if (real_path == NULL)
         return -errno;
 
-    if (settings.chmod_allow_x) {
+    if (settings.chmod_allow_x)
+    {
         /* Get the old permission bits and see which bits would change. */
-        if (lstat(real_path, &st) == -1) {
+        if (lstat(real_path, &st) == -1)
+        {
             free(real_path);
             return -errno;
         }
 
-        if (S_ISREG(st.st_mode)) {
+        if (S_ISREG(st.st_mode))
+        {
             diff = (st.st_mode & 07777) ^ (mode & 07777);
             file_execute_only = 1;
         }
     }
 
-    switch (settings.chmod_policy) {
+    switch (settings.chmod_policy)
+    {
     case CHMOD_NORMAL:
         mode = permchain_apply(settings.chmod_permchain, mode);
-        if (chmod(real_path, mode) == -1) {
+        if (chmod(real_path, mode) == -1)
+        {
             free(real_path);
             return -errno;
         }
         free(real_path);
         return 0;
     case CHMOD_IGNORE:
-        if (file_execute_only) {
+        if (file_execute_only)
+        {
             diff &= 00111; /* See which execute bits were flipped.
                               Forget about other differences. */
-            if (chmod(real_path, st.st_mode ^ diff) == -1) {
+            if (chmod(real_path, st.st_mode ^ diff) == -1)
+            {
                 free(real_path);
                 return -errno;
             }
@@ -985,10 +1094,13 @@ static int bindfs_chmod(const char *path, mode_t mode)
         free(real_path);
         return 0;
     case CHMOD_DENY:
-        if (file_execute_only) {
-            if ((diff & 07666) == 0) {
+        if (file_execute_only)
+        {
+            if ((diff & 07666) == 0)
+            {
                 /* Only execute bits have changed, so we can allow this. */
-                if (chmod(real_path, mode) == -1) {
+                if (chmod(real_path, mode) == -1)
+                {
                     free(real_path);
                     return -errno;
                 }
@@ -1008,11 +1120,14 @@ static int bindfs_chown(const char *path, uid_t uid, gid_t gid)
     int res;
     char *real_path;
 
-    if (uid != -1) {
-        switch (settings.chown_policy) {
+    if (uid != -1)
+    {
+        switch (settings.chown_policy)
+        {
         case CHOWN_NORMAL:
             uid = usermap_get_uid_or_default(settings.usermap_reverse, uid, uid);
-            if (!unapply_uid_offset(&uid)) {
+            if (!unapply_uid_offset(&uid))
+            {
                 return -UID_GID_OVERFLOW_ERRNO;
             }
             break;
@@ -1024,11 +1139,14 @@ static int bindfs_chown(const char *path, uid_t uid, gid_t gid)
         }
     }
 
-    if (gid != -1) {
-        switch (settings.chgrp_policy) {
+    if (gid != -1)
+    {
+        switch (settings.chgrp_policy)
+        {
         case CHGRP_NORMAL:
             gid = usermap_get_gid_or_default(settings.usermap_reverse, gid, gid);
-            if (!unapply_gid_offset(&gid)) {
+            if (!unapply_gid_offset(&gid))
+            {
                 return -UID_GID_OVERFLOW_ERRNO;
             }
             break;
@@ -1040,7 +1158,8 @@ static int bindfs_chown(const char *path, uid_t uid, gid_t gid)
         }
     }
 
-    if (uid != -1 || gid != -1) {
+    if (uid != -1 || gid != -1)
+    {
         real_path = process_path(path, true);
         if (real_path == NULL)
             return -errno;
@@ -1075,7 +1194,7 @@ static int bindfs_ftruncate(const char *path, off_t size,
                             struct fuse_file_info *fi)
 {
     int res;
-    (void) path;
+    (void)path;
 
     res = ftruncate(fi->fh, size);
     if (res == -1)
@@ -1105,7 +1224,7 @@ static int bindfs_utimens(const char *path, const struct timespec ts[2])
 #else
 #error "No symlink-compatible utime* function available."
 #endif
- 
+
     free(real_path);
     if (res == -1)
         return -errno;
@@ -1128,13 +1247,15 @@ static int bindfs_create(const char *path, mode_t mode, struct fuse_file_info *f
 
     int flags = fi->flags;
 #ifdef __linux__
-    if (!settings.forward_odirect) {
+    if (!settings.forward_odirect)
+    {
         flags &= ~O_DIRECT;
     }
 #endif
 
     fd = open(real_path, flags, mode & 0777);
-    if (fd == -1) {
+    if (fd == -1)
+    {
         free(real_path);
         return -errno;
     }
@@ -1158,7 +1279,8 @@ static int bindfs_open(const char *path, struct fuse_file_info *fi)
 
     int flags = fi->flags;
 #ifdef __linux__
-    if (!settings.forward_odirect) {
+    if (!settings.forward_odirect)
+    {
         flags &= ~O_DIRECT;
     }
 #endif
@@ -1176,20 +1298,23 @@ static int bindfs_read(const char *path, char *buf, size_t size, off_t offset,
                        struct fuse_file_info *fi)
 {
     int res;
-    (void) path;
+    (void)path;
 
     char *target_buf = buf;
 
-    if (settings.read_limiter) {
+    if (settings.read_limiter)
+    {
         rate_limiter_wait(settings.read_limiter, size);
     }
 
 #ifdef __linux__
     size_t mmap_size = 0;
-    if ((fi->flags & O_DIRECT) && settings.forward_odirect) {
+    if ((fi->flags & O_DIRECT) && settings.forward_odirect)
+    {
         mmap_size = round_up_buffer_size_for_direct_io(size);
         target_buf = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-        if (target_buf == MAP_FAILED) {
+        if (target_buf == MAP_FAILED)
+        {
             return -ENOMEM;
         }
     }
@@ -1200,7 +1325,8 @@ static int bindfs_read(const char *path, char *buf, size_t size, off_t offset,
         res = -errno;
 
 #ifdef __linux__
-    if (target_buf != buf) {
+    if (target_buf != buf)
+    {
         memcpy(buf, target_buf, size);
         munmap(target_buf, mmap_size);
     }
@@ -1213,19 +1339,22 @@ static int bindfs_write(const char *path, const char *buf, size_t size,
                         off_t offset, struct fuse_file_info *fi)
 {
     int res;
-    (void) path;
-    char *source_buf = (char*)buf;
+    (void)path;
+    char *source_buf = (char *)buf;
 
-    if (settings.write_limiter) {
+    if (settings.write_limiter)
+    {
         rate_limiter_wait(settings.write_limiter, size);
     }
 
 #ifdef __linux__
     size_t mmap_size = 0;
-    if ((fi->flags & O_DIRECT) && settings.forward_odirect) {
+    if ((fi->flags & O_DIRECT) && settings.forward_odirect)
+    {
         mmap_size = round_up_buffer_size_for_direct_io(size);
         source_buf = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-        if (source_buf == MAP_FAILED) {
+        if (source_buf == MAP_FAILED)
+        {
             return -ENOMEM;
         }
         memcpy(source_buf, buf, size);
@@ -1237,9 +1366,10 @@ static int bindfs_write(const char *path, const char *buf, size_t size,
         res = -errno;
 
 #ifdef __linux__
-    if (source_buf != buf) {
+    if (source_buf != buf)
+    {
         munmap(source_buf, mmap_size);
-    } 
+    }
 #endif
 
     return res;
@@ -1249,18 +1379,20 @@ static int bindfs_write(const char *path, const char *buf, size_t size,
 static int bindfs_lock(const char *path, struct fuse_file_info *fi, int cmd,
                        struct flock *lock)
 {
-  int res = fcntl(fi->fh, cmd, lock);
-  if (res == -1) {
-    return -errno;
-  }
-  return 0;
+    int res = fcntl(fi->fh, cmd, lock);
+    if (res == -1)
+    {
+        return -errno;
+    }
+    return 0;
 }
 
 /* This callback is only installed if lock forwarding is enabled. */
 static int bindfs_flock(const char *path, struct fuse_file_info *fi, int op)
 {
     int res = flock(fi->fh, op);
-    if (res == -1) {
+    if (res == -1)
+    {
         return -errno;
     }
     return 0;
@@ -1271,8 +1403,9 @@ static int bindfs_ioctl(const char *path, int cmd, void *arg,
                         void *data)
 {
     int res = ioctl(fi->fh, cmd, data);
-    if (res == -1) {
-      return -errno;
+    if (res == -1)
+    {
+        return -errno;
     }
     return res;
 }
@@ -1296,7 +1429,7 @@ static int bindfs_statfs(const char *path, struct statvfs *stbuf)
 
 static int bindfs_release(const char *path, struct fuse_file_info *fi)
 {
-    (void) path;
+    (void)path;
 
     close(fi->fh);
 
@@ -1307,16 +1440,16 @@ static int bindfs_fsync(const char *path, int isdatasync,
                         struct fuse_file_info *fi)
 {
     int res;
-    (void) path;
+    (void)path;
 
 #ifndef HAVE_FDATASYNC
-    (void) isdatasync;
+    (void)isdatasync;
 #else
     if (isdatasync)
         res = fdatasync(fi->fh);
     else
 #endif
-        res = fsync(fi->fh);
+    res = fsync(fi->fh);
     if (res == -1)
         return -errno;
 
@@ -1349,16 +1482,20 @@ static int bindfs_setxattr(const char *path, const char *name, const char *value
         return -errno;
 
 #if defined(__APPLE__)
-    if (!strncmp(name, XATTR_APPLE_PREFIX, sizeof(XATTR_APPLE_PREFIX) - 1)) {
+    if (!strncmp(name, XATTR_APPLE_PREFIX, sizeof(XATTR_APPLE_PREFIX) - 1))
+    {
         flags &= ~(XATTR_NOSECURITY);
     }
-    flags |= XATTR_NOFOLLOW;  // TODO: check if this is actually correct and necessary
-    if (!strcmp(name, A_KAUTH_FILESEC_XATTR)) {
+    flags |= XATTR_NOFOLLOW; // TODO: check if this is actually correct and necessary
+    if (!strcmp(name, A_KAUTH_FILESEC_XATTR))
+    {
         char new_name[MAXPATHLEN];
         memcpy(new_name, A_KAUTH_FILESEC_XATTR, sizeof(A_KAUTH_FILESEC_XATTR));
         memcpy(new_name, G_PREFIX, sizeof(G_PREFIX) - 1);
         res = setxattr(real_path, new_name, value, size, position, flags);
-    } else {
+    }
+    else
+    {
         res = setxattr(real_path, name, value, size, position, flags);
     }
 #elif defined(HAVE_LSETXATTR)
@@ -1391,12 +1528,15 @@ static int bindfs_getxattr(const char *path, const char *name, char *value,
         return -errno;
 
 #if defined(__APPLE__)
-    if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0) {
+    if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0)
+    {
         char new_name[MAXPATHLEN];
         memcpy(new_name, A_KAUTH_FILESEC_XATTR, sizeof(A_KAUTH_FILESEC_XATTR));
         memcpy(new_name, G_PREFIX, sizeof(G_PREFIX) - 1);
         res = getxattr(real_path, new_name, value, size, position, XATTR_NOFOLLOW);
-    } else {
+    }
+    else
+    {
         res = getxattr(real_path, name, value, size, position, XATTR_NOFOLLOW);
     }
 #elif defined(HAVE_LGETXATTR)
@@ -1410,7 +1550,7 @@ static int bindfs_getxattr(const char *path, const char *name, char *value,
     return res;
 }
 
-static int bindfs_listxattr(const char *path, char* list, size_t size)
+static int bindfs_listxattr(const char *path, char *list, size_t size)
 {
     char *real_path;
 
@@ -1422,13 +1562,17 @@ static int bindfs_listxattr(const char *path, char* list, size_t size)
 
 #if defined(__APPLE__)
     ssize_t res = listxattr(real_path, list, size, XATTR_NOFOLLOW);
-    if (res > 0) {
-        if (list) {
+    if (res > 0)
+    {
+        if (list)
+        {
             size_t len = 0;
-            char* curr = list;
-            do {
+            char *curr = list;
+            do
+            {
                 size_t thislen = strlen(curr) + 1;
-                if (strcmp(curr, G_KAUTH_FILESEC_XATTR) == 0) {
+                if (strcmp(curr, G_KAUTH_FILESEC_XATTR) == 0)
+                {
                     memmove(curr, curr + thislen, res - len - thislen);
                     res -= thislen;
                     break;
@@ -1436,7 +1580,9 @@ static int bindfs_listxattr(const char *path, char* list, size_t size)
                 curr += thislen;
                 len += thislen;
             } while (len < res);
-        } else {
+        }
+        else
+        {
             // TODO: https://github.com/osxfuse/fuse/blob/master/example/fusexmp_fh.c
             // had this commented out bit here o_O
             /*
@@ -1474,12 +1620,15 @@ static int bindfs_removexattr(const char *path, const char *name)
         return -errno;
 
 #if defined(__APPLE__)
-    if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0) {
+    if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0)
+    {
         char new_name[MAXPATHLEN];
         memcpy(new_name, A_KAUTH_FILESEC_XATTR, sizeof(A_KAUTH_FILESEC_XATTR));
         memcpy(new_name, G_PREFIX, sizeof(G_PREFIX) - 1);
         res = removexattr(real_path, new_name, XATTR_NOFOLLOW);
-    } else {
+    }
+    else
+    {
         res = removexattr(real_path, name, XATTR_NOFOLLOW);
     }
 #elif defined(HAVE_LREMOVEXATTR)
@@ -1495,44 +1644,43 @@ static int bindfs_removexattr(const char *path, const char *name)
 }
 #endif /* HAVE_SETXATTR */
 
-
 static struct fuse_operations bindfs_oper = {
-    .init       = bindfs_init,
-    .destroy    = bindfs_destroy,
-    .getattr    = bindfs_getattr,
-    .fgetattr   = bindfs_fgetattr,
+    .init = bindfs_init,
+    .destroy = bindfs_destroy,
+    .getattr = bindfs_getattr,
+    .fgetattr = bindfs_fgetattr,
     /* no access() since we always use -o default_permissions */
-    .readlink   = bindfs_readlink,
-    .readdir    = bindfs_readdir,
-    .mknod      = bindfs_mknod,
-    .mkdir      = bindfs_mkdir,
-    .symlink    = bindfs_symlink,
-    .unlink     = bindfs_unlink,
-    .rmdir      = bindfs_rmdir,
-    .rename     = bindfs_rename,
-    .link       = bindfs_link,
-    .chmod      = bindfs_chmod,
-    .chown      = bindfs_chown,
-    .truncate   = bindfs_truncate,
-    .ftruncate  = bindfs_ftruncate,
-    .utimens    = bindfs_utimens,
-    .create     = bindfs_create,
-    .open       = bindfs_open,
-    .read       = bindfs_read,
-    .write      = bindfs_write,
+    .readlink = bindfs_readlink,
+    .readdir = bindfs_readdir,
+    .mknod = bindfs_mknod,
+    .mkdir = bindfs_mkdir,
+    .symlink = bindfs_symlink,
+    .unlink = bindfs_unlink,
+    .rmdir = bindfs_rmdir,
+    .rename = bindfs_rename,
+    .link = bindfs_link,
+    .chmod = bindfs_chmod,
+    .chown = bindfs_chown,
+    .truncate = bindfs_truncate,
+    .ftruncate = bindfs_ftruncate,
+    .utimens = bindfs_utimens,
+    .create = bindfs_create,
+    .open = bindfs_open,
+    .read = bindfs_read,
+    .write = bindfs_write,
 #ifdef HAVE_FUSE_29
-    .lock       = bindfs_lock,
-    .flock      = bindfs_flock,
+    .lock = bindfs_lock,
+    .flock = bindfs_flock,
 #endif
-    .ioctl      = bindfs_ioctl,
-    .statfs     = bindfs_statfs,
-    .release    = bindfs_release,
-    .fsync      = bindfs_fsync,
+    .ioctl = bindfs_ioctl,
+    .statfs = bindfs_statfs,
+    .release = bindfs_release,
+    .fsync = bindfs_fsync,
 #ifdef HAVE_SETXATTR
-    .setxattr   = bindfs_setxattr,
-    .getxattr   = bindfs_getxattr,
-    .listxattr  = bindfs_listxattr,
-    .removexattr= bindfs_removexattr,
+    .setxattr = bindfs_setxattr,
+    .getxattr = bindfs_getxattr,
+    .listxattr = bindfs_listxattr,
+    .removexattr = bindfs_removexattr,
 #endif
 };
 
@@ -1628,8 +1776,8 @@ static void print_usage(const char *progname)
            progname);
 }
 
-
-enum OptionKey {
+enum OptionKey
+{
     OPTKEY_NONOPTION = -2,
     OPTKEY_UNKNOWN = -1,
     OPTKEY_HELP,
@@ -1681,9 +1829,12 @@ static int process_option(void *data, const char *arg, int key,
         exit(0);
 
     case OPTKEY_CREATE_AS_USER:
-        if (getuid() == 0) {
+        if (getuid() == 0)
+        {
             settings.create_policy = CREATE_AS_USER;
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "Error: You need to be root to use --create-as-user !\n");
             return -1;
         }
@@ -1740,7 +1891,7 @@ static int process_option(void *data, const char *arg, int key,
         settings.delete_deny = 1;
         return 0;
     case OPTKEY_RENAME_DENY:
-        settings.rename_deny= 1;
+        settings.rename_deny = 1;
         return 0;
 
     case OPTKEY_REALISTIC_PERMISSIONS:
@@ -1769,32 +1920,42 @@ static int process_option(void *data, const char *arg, int key,
         return 0;
 
     case OPTKEY_NONOPTION:
-        if (!settings.mntsrc) {
-            if (strncmp(arg, "/proc/", strlen("/proc/")) == 0) {
+        if (!settings.mntsrc)
+        {
+            if (strncmp(arg, "/proc/", strlen("/proc/")) == 0 || settings.map_to_calling_user)
+            {
                 // /proc/<PID>/root is a strange magical symlink that points to '/' when inspected,
                 // but leads to a container's root directory when traversed.
                 // This only works if we don't call realpath() on it.
                 // See also: #66
                 settings.mntsrc = strdup(arg);
-            } else {
+            }
+            else
+            {
                 settings.mntsrc = realpath(arg, NULL);
             }
-            if (settings.mntsrc == NULL) {
+            if (settings.mntsrc == NULL)
+            {
                 fprintf(stderr, "Failed to resolve source directory `%s': ", arg);
                 perror(NULL);
                 return -1;
             }
             return 0;
-        } else if (!settings.mntdest) {
+        }
+        else if (!settings.mntdest)
+        {
             settings.mntdest = realpath(arg, NULL);
-            if (settings.mntdest == NULL) {
+            if (settings.mntdest == NULL)
+            {
                 fprintf(stderr, "Failed to resolve mount point `%s': ", arg);
                 perror(NULL);
                 return -1;
             }
             settings.mntdest_len = strlen(settings.mntdest);
             return 1; /* leave this argument for fuse_main */
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "Too many arguments given\n");
             return -1;
         }
@@ -1804,7 +1965,7 @@ static int process_option(void *data, const char *arg, int key,
     }
 }
 
-static int parse_mirrored_users(char* mirror)
+static int parse_mirrored_users(char *mirror)
 {
     int i;
     int j;
@@ -1816,23 +1977,29 @@ static int parse_mirrored_users(char* mirror)
                                     count_substrs(mirror, ",@") +
                                     count_substrs(mirror, ":@");
     settings.num_mirrored_users -= settings.num_mirrored_members;
-    settings.mirrored_users = malloc(settings.num_mirrored_users*sizeof(uid_t));
-    settings.mirrored_members = malloc(settings.num_mirrored_members*sizeof(gid_t));
+    settings.mirrored_users = malloc(settings.num_mirrored_users * sizeof(uid_t));
+    settings.mirrored_members = malloc(settings.num_mirrored_members * sizeof(gid_t));
 
     i = 0; /* iterate over mirrored_users */
     j = 0; /* iterate over mirrored_members */
     p = mirror;
-    while (i < settings.num_mirrored_users || j < settings.num_mirrored_members) {
+    while (i < settings.num_mirrored_users || j < settings.num_mirrored_members)
+    {
         tmpstr = strdup_until(p, ",:");
 
-        if (*tmpstr == '@') { /* This is a group name */
-            if (!group_gid(tmpstr + 1, &settings.mirrored_members[j++])) {
+        if (*tmpstr == '@')
+        { /* This is a group name */
+            if (!group_gid(tmpstr + 1, &settings.mirrored_members[j++]))
+            {
                 fprintf(stderr, "Invalid group ID: '%s'\n", tmpstr + 1);
                 free(tmpstr);
                 return 0;
             }
-        } else {
-            if (!user_uid(tmpstr, &settings.mirrored_users[i++])) {
+        }
+        else
+        {
+            if (!user_uid(tmpstr, &settings.mirrored_users[i++]))
+            {
                 fprintf(stderr, "Invalid user ID: '%s'\n", tmpstr);
                 free(tmpstr);
                 return 0;
@@ -1840,12 +2007,16 @@ static int parse_mirrored_users(char* mirror)
         }
         free(tmpstr);
 
-        while (*p != '\0' && *p != ',' && *p != ':') {
+        while (*p != '\0' && *p != ',' && *p != ':')
+        {
             ++p;
         }
-        if (*p != '\0') {
+        if (*p != '\0')
+        {
             ++p;
-        } else {
+        }
+        else
+        {
             /* Done. The counters should match. */
             assert(i == settings.num_mirrored_users);
             assert(j == settings.num_mirrored_members);
@@ -1876,14 +2047,17 @@ static int parse_map_file(UserMap *map, UserMap *reverse_map, char *file, int as
 
     // Toggle between UID (passwd) and GID (group)
     const int (*value_to_id)(const char *username, uid_t *ret);
-    const UsermapStatus (*usermap_add)(UserMap *map, uid_t from, uid_t to);
+    const UsermapStatus (*usermap_add)(UserMap * map, uid_t from, uid_t to);
     const char *label_name, *label_id;
-    if (as_gid) {
+    if (as_gid)
+    {
         value_to_id = &group_gid;
         usermap_add = &usermap_add_gid;
         label_name = "group";
         label_id = "GID";
-    } else {
+    }
+    else
+    {
         value_to_id = &user_uid;
         usermap_add = &usermap_add_uid;
         label_name = "user";
@@ -1891,15 +2065,18 @@ static int parse_map_file(UserMap *map, UserMap *reverse_map, char *file, int as
     }
 
     fp = fopen(file, "r");
-    if (fp == NULL) {
+    if (fp == NULL)
+    {
         fprintf(stderr, "Failed to open file: %s\n", file);
         goto exit;
     }
 
-    while ((read = getline(&line, &len, fp)) != -1) {
+    while ((read = getline(&line, &len, fp)) != -1)
+    {
         // Remove newline in case someone builds a file with lines like 'a:b:123' by hand.
         // If we left the newline, strtok would return "123\n" as the last token.
-        if (read > 0 && line[read - 1] == '\n') {
+        if (read > 0 && line[read - 1] == '\n')
+        {
             line[read - 1] = '\0';
         }
 
@@ -1910,36 +2087,43 @@ static int parse_map_file(UserMap *map, UserMap *reverse_map, char *file, int as
          * [GU]ID = FROM
          */
         column = strtok(line, ":");
-        if (column == NULL) {
+        if (column == NULL)
+        {
             fprintf(stderr, "Unexpected end of entry in %s on line %d\n", file, lineno);
             goto exit;
         }
-        if (!value_to_id(column, &uid_to)) {
+        if (!value_to_id(column, &uid_to))
+        {
             fprintf(stderr, "Warning: Ignoring invalid %s in %s on line %d: '%s'\n", label_name, file, lineno, column);
             continue;
         }
 
         column = strtok(NULL, ":");
-        if (column != NULL) {
+        if (column != NULL)
+        {
             // Skip second column
             column = strtok(NULL, ":");
         }
-        if (column == NULL) {
+        if (column == NULL)
+        {
             fprintf(stderr, "Unexpected end of entry in %s on line %d\n", file, lineno);
             goto exit;
         }
-        if (!value_to_id(column, &uid_from)) {
+        if (!value_to_id(column, &uid_from))
+        {
             fprintf(stderr, "Warning: Ignoring invalid %s in %s on line %d: '%s'\n", label_id, file, lineno, column);
             continue;
         }
 
         status = usermap_add(map, uid_from, uid_to);
-        if (status != 0) {
+        if (status != 0)
+        {
             fprintf(stderr, "%s\n", usermap_errorstr(status));
             goto exit;
         }
         status = usermap_add(reverse_map, uid_to, uid_from);
-        if (status != 0) {
+        if (status != 0)
+        {
             fprintf(stderr, "%s\n", usermap_errorstr(status));
             goto exit;
         }
@@ -1947,10 +2131,12 @@ static int parse_map_file(UserMap *map, UserMap *reverse_map, char *file, int as
 
     result = 1;
 exit:
-    if (line) {
+    if (line)
+    {
         free(line);
     }
-    if (fp != NULL) {
+    if (fp != NULL)
+    {
         fclose(fp);
     }
     return result;
@@ -1965,72 +2151,87 @@ static int parse_user_map(UserMap *map, UserMap *reverse_map, char *spec)
     gid_t gid_from, gid_to;
     UsermapStatus status;
 
-    while (*p != '\0') {
+    while (*p != '\0')
+    {
         free(tmpstr);
         tmpstr = strdup_until(p, ",:");
 
-        if (tmpstr[0] == '@') { /* group */
+        if (tmpstr[0] == '@')
+        { /* group */
             q = strstr(tmpstr, "/@");
-            if (!q) {
+            if (!q)
+            {
                 fprintf(stderr, "Invalid syntax: expected @group1/@group2 but got `%s`\n", tmpstr);
                 goto fail;
             }
             *q = '\0';
-            if (!group_gid(tmpstr + 1, &gid_from)) {
+            if (!group_gid(tmpstr + 1, &gid_from))
+            {
                 fprintf(stderr, "Invalid group: %s\n", tmpstr + 1);
                 goto fail;
             }
             q += strlen("/@");
-            if (!group_gid(q, &gid_to)) {
+            if (!group_gid(q, &gid_to))
+            {
                 fprintf(stderr, "Invalid group: %s\n", q);
                 goto fail;
             }
 
             status = usermap_add_gid(map, gid_from, gid_to);
-            if (status != 0) {
+            if (status != 0)
+            {
                 fprintf(stderr, "%s\n", usermap_errorstr(status));
                 goto fail;
             }
             status = usermap_add_gid(reverse_map, gid_to, gid_from);
-            if (status != 0) {
+            if (status != 0)
+            {
                 fprintf(stderr, "%s\n", usermap_errorstr(status));
                 goto fail;
             }
-
-        } else {
+        }
+        else
+        {
 
             q = strstr(tmpstr, "/");
-            if (!q) {
+            if (!q)
+            {
                 fprintf(stderr, "Invalid syntax: expected user1/user2 but got `%s`\n", tmpstr);
                 goto fail;
             }
             *q = '\0';
-            if (!user_uid(tmpstr, &uid_from)) {
+            if (!user_uid(tmpstr, &uid_from))
+            {
                 fprintf(stderr, "Invalid username: %s\n", tmpstr);
                 goto fail;
             }
             q += strlen("/");
-            if (!user_uid(q, &uid_to)) {
+            if (!user_uid(q, &uid_to))
+            {
                 fprintf(stderr, "Invalid username: %s\n", q);
                 goto fail;
             }
 
             status = usermap_add_uid(map, uid_from, uid_to);
-            if (status != 0) {
+            if (status != 0)
+            {
                 fprintf(stderr, "%s\n", usermap_errorstr(status));
                 goto fail;
             }
             status = usermap_add_uid(reverse_map, uid_to, uid_from);
-            if (status != 0) {
+            if (status != 0)
+            {
                 fprintf(stderr, "%s\n", usermap_errorstr(status));
                 goto fail;
             }
         }
 
-        while (*p != '\0' && *p != ',' && *p != ':') {
+        while (*p != '\0' && *p != ',' && *p != ':')
+        {
             ++p;
         }
-        if (*p != '\0') {
+        if (*p != '\0')
+        {
             ++p;
         }
     }
@@ -2069,8 +2270,9 @@ static void maybe_stdout_stderr_to_file()
 static char *get_working_dir()
 {
     size_t buf_size = 4096;
-    char* buf = malloc(buf_size);
-    while (!getcwd(buf, buf_size)) {
+    char *buf = malloc(buf_size);
+    while (!getcwd(buf, buf_size))
+    {
         buf_size *= 2;
         buf = realloc(buf, buf_size);
     }
@@ -2098,12 +2300,14 @@ static void atexit_func()
     free(settings.mntdest);
     free(settings.original_working_dir);
     settings.original_working_dir = NULL;
-    if (settings.read_limiter) {
+    if (settings.read_limiter)
+    {
         rate_limiter_destroy(settings.read_limiter);
         free(settings.read_limiter);
         settings.read_limiter = NULL;
     }
-    if (settings.write_limiter) {
+    if (settings.write_limiter)
+    {
         rate_limiter_destroy(settings.write_limiter);
         free(settings.write_limiter);
         settings.write_limiter = NULL;
@@ -2129,7 +2333,8 @@ int main(int argc, char *argv[])
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 
     /* Fuse's option parser will store things here. */
-    struct OptionData {
+    struct OptionData
+    {
         char *user;
         char *deprecated_user;
         char *group;
@@ -2154,16 +2359,20 @@ int main(int argc, char *argv[])
         char *gid_offset;
     } od;
 
-    #define OPT2(one, two, key) \
-            FUSE_OPT_KEY(one, key), \
-            FUSE_OPT_KEY(two, key)
-    #define OPT_OFFSET2(one, two, offset, key) \
-            {one, offsetof(struct OptionData, offset), key}, \
-            {two, offsetof(struct OptionData, offset), key}
-    #define OPT_OFFSET3(one, two, three, offset, key) \
-            {one, offsetof(struct OptionData, offset), key}, \
-            {two, offsetof(struct OptionData, offset), key}, \
-            {three, offsetof(struct OptionData, offset), key}
+#define OPT2(one, two, key) \
+    FUSE_OPT_KEY(one, key), \
+        FUSE_OPT_KEY(two, key)
+#define OPT_OFFSET2(one, two, offset, key)            \
+    {one, offsetof(struct OptionData, offset), key},  \
+    {                                                 \
+        two, offsetof(struct OptionData, offset), key \
+    }
+#define OPT_OFFSET3(one, two, three, offset, key)        \
+    {one, offsetof(struct OptionData, offset), key},     \
+        {two, offsetof(struct OptionData, offset), key}, \
+    {                                                    \
+        three, offsetof(struct OptionData, offset), key  \
+    }
     static const struct fuse_opt options[] = {
         OPT2("-h", "--help", OPTKEY_HELP),
         OPT2("-V", "--version", OPTKEY_VERSION),
@@ -2228,11 +2437,9 @@ int main(int argc, char *argv[])
         OPT_OFFSET2("--uid-offset=%s", "uid-offset=%s", uid_offset, 0),
         OPT_OFFSET2("--gid-offset=%s", "gid-offset=%s", gid_offset, 0),
 
-        FUSE_OPT_END
-    };
+        FUSE_OPT_END};
 
     int fuse_main_return;
-
 
     /* Initialize settings */
     memset(&od, 0, sizeof(od));
@@ -2246,6 +2453,7 @@ int main(int argc, char *argv[])
     settings.new_gid = -1;
     settings.create_for_uid = -1;
     settings.create_for_gid = -1;
+    settings.map_to_calling_user = 1; // TODO: Make an option
     settings.mntsrc = NULL;
     settings.mntdest = NULL;
     settings.mntdest_len = 0;
@@ -2287,143 +2495,180 @@ int main(int argc, char *argv[])
         return 1;
 
     /* Check that a source directory and a mount point was given */
-    if (!settings.mntsrc || !settings.mntdest) {
+    if (!settings.mntsrc || !settings.mntdest)
+    {
         print_usage(my_basename(argv[0]));
         return 1;
     }
 
     /* Check for deprecated options */
-    if (od.deprecated_user) {
+    if (od.deprecated_user)
+    {
         fprintf(stderr, "Deprecation warning: please use --force-user instead of --user or --owner.\n");
         fprintf(stderr, "The new option has the same effect. See the man page for details.\n");
-        if (!od.user) {
+        if (!od.user)
+        {
             od.user = od.deprecated_user;
         }
     }
-    if (od.deprecated_group) {
+    if (od.deprecated_group)
+    {
         fprintf(stderr, "Deprecation warning: please use --force-group instead of --group.\n");
         fprintf(stderr, "The new option has the same effect. See the man page for details.\n");
-        if (!od.group) {
+        if (!od.group)
+        {
             od.group = od.deprecated_group;
         }
     }
 
     /* Parse new owner and group */
-    if (od.user) {
-        if (!user_uid(od.user, &settings.new_uid)) {
+    if (od.user)
+    {
+        if (!user_uid(od.user, &settings.new_uid))
+        {
             fprintf(stderr, "Not a valid user ID: %s\n", od.user);
             return 1;
         }
     }
-    if (od.group) {
-        if (!group_gid(od.group, &settings.new_gid)) {
+    if (od.group)
+    {
+        if (!group_gid(od.group, &settings.new_gid))
+        {
             fprintf(stderr, "Not a valid group ID: %s\n", od.group);
             return 1;
         }
     }
 
     /* Parse rate limits */
-    if (od.read_rate) {
+    if (od.read_rate)
+    {
         double rate;
-        if (parse_byte_count(od.read_rate, &rate) && rate > 0) {
+        if (parse_byte_count(od.read_rate, &rate) && rate > 0)
+        {
             settings.read_limiter = malloc(sizeof(RateLimiter));
             rate_limiter_init(settings.read_limiter, rate, &gettimeofday_clock);
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "Error: Invalid --read-rate.\n");
             return 1;
         }
     }
-    if (od.write_rate) {
+    if (od.write_rate)
+    {
         double rate;
-        if (parse_byte_count(od.write_rate, &rate) && rate > 0) {
+        if (parse_byte_count(od.write_rate, &rate) && rate > 0)
+        {
             settings.write_limiter = malloc(sizeof(RateLimiter));
             rate_limiter_init(settings.write_limiter, rate, &gettimeofday_clock);
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "Error: Invalid --write-rate.\n");
             return 1;
         }
     }
 
     /* Parse passwd */
-    if (od.map_passwd) {
-        if (getuid() != 0) {
+    if (od.map_passwd)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --map-passwd !\n");
             return 1;
         }
-        if (!parse_map_file(settings.usermap, settings.usermap_reverse, od.map_passwd, 0)) {
+        if (!parse_map_file(settings.usermap, settings.usermap_reverse, od.map_passwd, 0))
+        {
             /* parse_map_file printed an error */
             return 1;
         }
     }
 
     /* Parse group */
-    if (od.map_group) {
-        if (getuid() != 0) {
+    if (od.map_group)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --map-group !\n");
             return 1;
         }
-        if (!parse_map_file(settings.usermap, settings.usermap_reverse, od.map_group, 1)) {
+        if (!parse_map_file(settings.usermap, settings.usermap_reverse, od.map_group, 1))
+        {
             /* parse_map_file printed an error */
             return 1;
         }
     }
 
     /* Parse usermap (may overwrite values from --map-passwd and --map-group) */
-    if (od.map) {
-        if (getuid() != 0) {
+    if (od.map)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --map !\n");
             return 1;
         }
-        if (!parse_user_map(settings.usermap, settings.usermap_reverse, od.map)) {
+        if (!parse_user_map(settings.usermap, settings.usermap_reverse, od.map))
+        {
             /* parse_user_map printed an error */
             return 1;
         }
     }
 
-    if (od.uid_offset) {
-        if (getuid() != 0) {
+    if (od.uid_offset)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --uid-offset !\n");
             return 1;
         }
-        if (od.map) {
+        if (od.map)
+        {
             fprintf(stderr, "Error: Cannot use --uid-offset and --map together!\n");
             return 1;
         }
-        char* endptr = od.uid_offset;
+        char *endptr = od.uid_offset;
         settings.uid_offset = strtoul(od.uid_offset, &endptr, 10);
-        if (*endptr != '\0') {
+        if (*endptr != '\0')
+        {
             fprintf(stderr, "Error: Value of --uid-offset must be an integer.\n");
             return 1;
         }
     }
 
-    if (od.gid_offset) {
-        if (getuid() != 0) {
+    if (od.gid_offset)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --gid-offset !\n");
             return 1;
         }
-        if (od.map) {
+        if (od.map)
+        {
             fprintf(stderr, "Error: Cannot use --gid-offset and --map together!\n");
             return 1;
         }
-        char* endptr = od.gid_offset;
+        char *endptr = od.gid_offset;
         settings.gid_offset = strtoul(od.gid_offset, &endptr, 10);
-        if (*endptr != '\0') {
+        if (*endptr != '\0')
+        {
             fprintf(stderr, "Error: Value of --gid-offset must be an integer.\n");
             return 1;
         }
     }
 
-    if (od.forward_odirect) {
+    if (od.forward_odirect)
+    {
 #ifdef __linux__
         settings.forward_odirect = 1;
-        char* endptr = od.forward_odirect;
+        char *endptr = od.forward_odirect;
         settings.odirect_alignment = strtoul(od.forward_odirect, &endptr, 10);
-        if (*endptr != '\0') {
+        if (*endptr != '\0')
+        {
             fprintf(stderr, "Error: Value of --forward-odirect must be an integer.\n");
             return 1;
         }
-        if (settings.odirect_alignment == 0) {
+        if (settings.odirect_alignment == 0)
+        {
             fprintf(stderr, "Error: Value of --forward-odirect must be positive.\n");
             return 1;
         }
@@ -2433,87 +2678,113 @@ int main(int argc, char *argv[])
     }
 
     /* Parse user and group for new creates */
-    if (od.create_for_user) {
-        if (getuid() != 0) {
+    if (od.create_for_user)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --create-for-user !\n");
             return 1;
         }
-        if (!user_uid(od.create_for_user, &settings.create_for_uid)) {
+        if (!user_uid(od.create_for_user, &settings.create_for_uid))
+        {
             fprintf(stderr, "Not a valid user ID: %s\n", od.create_for_user);
             return 1;
         }
     }
-    if (od.create_for_group) {
-        if (getuid() != 0) {
+    if (od.create_for_group)
+    {
+        if (getuid() != 0)
+        {
             fprintf(stderr, "Error: You need to be root to use --create-for-group !\n");
             return 1;
         }
-        if (!group_gid(od.create_for_group, &settings.create_for_gid)) {
+        if (!group_gid(od.create_for_group, &settings.create_for_gid))
+        {
             fprintf(stderr, "Not a valid group ID: %s\n", od.create_for_group);
             return 1;
         }
     }
 
     /* Parse mirrored users and groups */
-    if (od.mirror && od.mirror_only) {
+    if (od.mirror && od.mirror_only)
+    {
         fprintf(stderr, "Cannot specify both -m|--mirror and -M|--mirror-only\n");
         return 1;
     }
-    if (od.mirror_only) {
+    if (od.mirror_only)
+    {
         settings.mirrored_users_only = 1;
         od.mirror = od.mirror_only;
     }
-    if (od.mirror) {
-        if (!parse_mirrored_users(od.mirror)) {
+    if (od.mirror)
+    {
+        if (!parse_mirrored_users(od.mirror))
+        {
             return 0;
         }
     }
 
     /* Parse permission bits */
-    if (od.perms) {
-        if (add_chmod_rules_to_permchain(od.perms, settings.permchain) != 0) {
+    if (od.perms)
+    {
+        if (add_chmod_rules_to_permchain(od.perms, settings.permchain) != 0)
+        {
             fprintf(stderr, "Invalid permission specification: '%s'\n", od.perms);
             return 1;
         }
     }
-    if (od.create_with_perms) {
-        if (add_chmod_rules_to_permchain(od.create_with_perms, settings.create_permchain) != 0) {
+    if (od.create_with_perms)
+    {
+        if (add_chmod_rules_to_permchain(od.create_with_perms, settings.create_permchain) != 0)
+        {
             fprintf(stderr, "Invalid permission specification: '%s'\n", od.create_with_perms);
             return 1;
         }
     }
-    if (od.chmod_filter) {
-        if (add_chmod_rules_to_permchain(od.chmod_filter, settings.chmod_permchain) != 0) {
+    if (od.chmod_filter)
+    {
+        if (add_chmod_rules_to_permchain(od.chmod_filter, settings.chmod_permchain) != 0)
+        {
             fprintf(stderr, "Invalid permission specification: '%s'\n", od.chmod_filter);
             return 1;
         }
     }
 
-
     /* Parse resolved_symlink_deletion */
-    if (od.resolved_symlink_deletion) {
-        if (strcmp(od.resolved_symlink_deletion, "deny") == 0) {
+    if (od.resolved_symlink_deletion)
+    {
+        if (strcmp(od.resolved_symlink_deletion, "deny") == 0)
+        {
             settings.resolved_symlink_deletion_policy = RESOLVED_SYMLINK_DELETION_DENY;
-        } else if (strcmp(od.resolved_symlink_deletion, "symlink-only") == 0) {
+        }
+        else if (strcmp(od.resolved_symlink_deletion, "symlink-only") == 0)
+        {
             settings.resolved_symlink_deletion_policy = RESOLVED_SYMLINK_DELETION_SYMLINK_ONLY;
-        } else if (strcmp(od.resolved_symlink_deletion, "symlink-first") == 0) {
+        }
+        else if (strcmp(od.resolved_symlink_deletion, "symlink-first") == 0)
+        {
             settings.resolved_symlink_deletion_policy = RESOLVED_SYMLINK_DELETION_SYMLINK_FIRST;
-        } else if (strcmp(od.resolved_symlink_deletion, "target-first") == 0) {
+        }
+        else if (strcmp(od.resolved_symlink_deletion, "target-first") == 0)
+        {
             settings.resolved_symlink_deletion_policy = RESOLVED_SYMLINK_DELETION_TARGET_FIRST;
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "Invalid setting for --resolved-symlink-deletion: '%s'\n", od.resolved_symlink_deletion);
             return 1;
         }
     }
 
-
     /* Single-threaded mode by default */
-    if (!od.multithreaded) {
+    if (!od.multithreaded)
+    {
         fuse_opt_add_arg(&args, "-s");
     }
 
     /* Add default fuse options */
-    if (!od.no_allow_other) {
+    if (!od.no_allow_other)
+    {
         fuse_opt_add_arg(&args, "-oallow_other");
     }
 
@@ -2532,7 +2803,8 @@ int main(int argc, char *argv[])
        (issue #47). The character blacklist is likely not complete, which is
        acceptable since this is not a security check. The aim is to avoid giving
        the user a confusing error. */
-    if (strpbrk(settings.mntsrc, ", \t\n") == NULL) {
+    if (strpbrk(settings.mntsrc, ", \t\n") == NULL)
+    {
         char *tmp = sprintf_new("-ofsname=%s", settings.mntsrc);
         fuse_opt_add_arg(&args, tmp);
         free(tmp);
@@ -2540,7 +2812,8 @@ int main(int argc, char *argv[])
 
     /* We need to disable the attribute cache whenever two users
        can see different attributes. For now, only mirroring can do that. */
-    if (is_mirroring_enabled()) {
+    if (is_mirroring_enabled())
+    {
         fuse_opt_add_arg(&args, "-oattr_timeout=0");
     }
 
@@ -2552,7 +2825,8 @@ int main(int argc, char *argv[])
 
     /* Open mount source for chrooting in bindfs_init */
     settings.mntsrc_fd = open(settings.mntsrc, O_RDONLY);
-    if (settings.mntsrc_fd == -1) {
+    if (settings.mntsrc_fd == -1 && !settings.map_to_calling_user)
+    {
         fprintf(stderr, "Could not open source directory\n");
         return 1;
     }
@@ -2561,7 +2835,8 @@ int main(int argc, char *argv[])
     settings.original_umask = umask(0);
 
     /* Remove xattr implementation if the user doesn't want it */
-    if (settings.xattr_policy == XATTR_UNIMPLEMENTED) {
+    if (settings.xattr_policy == XATTR_UNIMPLEMENTED)
+    {
         bindfs_oper.setxattr = NULL;
         bindfs_oper.getxattr = NULL;
         bindfs_oper.listxattr = NULL;
@@ -2570,7 +2845,8 @@ int main(int argc, char *argv[])
 
 #ifdef HAVE_FUSE_29
     /* Check that lock forwarding is not enabled in single-threaded mode. */
-    if (settings.enable_lock_forwarding && !od.multithreaded) {
+    if (settings.enable_lock_forwarding && !od.multithreaded)
+    {
         fprintf(stderr, "To use --enable-lock-forwarding, you must use "
                         "--multithreaded, but see the man page for caveats!\n");
         return 1;
@@ -2578,12 +2854,14 @@ int main(int argc, char *argv[])
 
     /* Remove the locking implementation unless the user has enabled lock
        forwarding. FUSE implements locking inside the mountpoint by default. */
-    if (!settings.enable_lock_forwarding) {
+    if (!settings.enable_lock_forwarding)
+    {
         bindfs_oper.lock = NULL;
         bindfs_oper.flock = NULL;
     }
 #else
-    if (settings.enable_lock_forwarding) {
+    if (settings.enable_lock_forwarding)
+    {
         fprintf(stderr, "To use --enable-lock-forwarding, bindfs must be "
                         "compiled with FUSE 2.9.0 or newer.\n");
         return 1;
@@ -2591,7 +2869,8 @@ int main(int argc, char *argv[])
 #endif
 
     /* Remove the ioctl implementation unless the user has enabled it */
-    if (!settings.enable_ioctl) {
+    if (!settings.enable_ioctl)
+    {
         bindfs_oper.ioctl = NULL;
     }
 
