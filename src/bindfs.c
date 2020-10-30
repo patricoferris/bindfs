@@ -343,6 +343,42 @@ static char *process_path(const char *path, bool resolve_symlinks)
         return NULL;
     }
 
+    // Change directory to /Users/$USER/local
+    if (settings.map_to_calling_user)
+    {
+        char result[256];
+        char userpath[512];
+        strcpy(userpath, "/Users/");
+        struct fuse_context *fc = fuse_get_context();
+        int status = get_user(fc->uid, result);
+
+        if (status == uid_error || status == uid_not_found)
+        {
+            fuse_exit(fuse_get_context()->fuse);
+        }
+
+        if (strncmp(result, "root", strlen("root")) != 0)
+        {
+            strcat(userpath, result);
+            strcat(userpath, "/local");
+            fprintf(stdout, "Change dir to: %s\n", userpath);
+
+            // TODO: Keep a list of open fds???
+            close(settings.mntsrc_fd);
+            int fd = open(userpath, O_RDONLY);
+            settings.mntsrc_fd = fd;
+            if (fchdir(fd) != 0)
+            {
+                fprintf(
+                    stderr,
+                    "Could not change working directory to '%s': %s\n",
+                    settings.mntsrc,
+                    strerror(errno));
+                fuse_exit(fuse_get_context()->fuse);
+            }
+        }
+    }
+
     while (*path == '/')
         ++path;
 
@@ -374,27 +410,6 @@ static char *process_path(const char *path, bool resolve_symlinks)
     }
     else
     {
-        if (settings.map_to_calling_user)
-        {
-            char result[100];
-            strcpy(result, "/Users/");
-            struct fuse_context *fc = fuse_get_context();
-            char *username = get_user(fc->uid);
-            if (strncmp(username, "root", strlen("root")) == 0)
-            {
-                DPRINTF("Denying `%s'", username);
-                errno = EPERM;
-                return NULL;
-                // return strdup("/Users/patrickferris/local");
-            }
-            strcat(result, username);
-            strcat(result, "/");
-            strcat(result, path);
-            DPRINTF("Denying `%s'", result);
-            errno = EPERM;
-            return NULL;
-            return strdup(result);
-        }
         return strdup(path);
     }
 }
@@ -1922,7 +1937,7 @@ static int process_option(void *data, const char *arg, int key,
     case OPTKEY_NONOPTION:
         if (!settings.mntsrc)
         {
-            if (strncmp(arg, "/proc/", strlen("/proc/")) == 0 || settings.map_to_calling_user)
+            if (strncmp(arg, "/proc/", strlen("/proc/")) == 0)
             {
                 // /proc/<PID>/root is a strange magical symlink that points to '/' when inspected,
                 // but leads to a container's root directory when traversed.
@@ -2825,7 +2840,7 @@ int main(int argc, char *argv[])
 
     /* Open mount source for chrooting in bindfs_init */
     settings.mntsrc_fd = open(settings.mntsrc, O_RDONLY);
-    if (settings.mntsrc_fd == -1 && !settings.map_to_calling_user)
+    if (settings.mntsrc_fd == -1)
     {
         fprintf(stderr, "Could not open source directory\n");
         return 1;
