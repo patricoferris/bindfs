@@ -51,6 +51,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <pthread.h>
 #ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
 #endif
@@ -135,6 +136,7 @@ static struct Settings
     int map_to_calling_user; /* Map calls to /Users/$USER/<path> */
     char *mntsrc;
     char *mntdest;
+    char *root_dest; /* For map_to_calling_user mode only */
     int mntdest_len; /* caches strlen(mntdest) */
     int mntsrc_fd;
 
@@ -343,39 +345,66 @@ static char *process_path(const char *path, bool resolve_symlinks)
         return NULL;
     }
 
-    // Change directory to /Users/$USER/local
+    /* Return a path based on the user calling the function.
+    The "change directory" approach can work, but not with 
+    simultaneous reads and writes to /usr/local as they will
+    (I think) change the mntdir underneath a function resulting 
+    in users writing to each other's files.
+    
+    One problem that we need to keep track of is calls to root (via sudo
+    for homebrew installation). Here we lose the context (uid) of the sudoer.
+    To make this work for a single-user Homebrew installation the last directory
+    (e.g. /Users/alice/local) is recorded to be reused by root calls.  */
     if (settings.map_to_calling_user)
     {
         char result[256];
-        char userpath[512];
-        strcpy(userpath, "/Users/");
         struct fuse_context *fc = fuse_get_context();
+
+        printf("PATHHHHHHHHHHHHHHHHHHH: %s %i\n", path, fc->uid);
+
         int status = get_user(fc->uid, result);
+        printf("RESULT %s for UID %i", result, fc->uid);
 
         if (status == uid_error || status == uid_not_found)
         {
             fuse_exit(fuse_get_context()->fuse);
         }
 
-        if (strncmp(result, "root", strlen("root")) != 0)
+        char userpath[512];
+        if (status == uid_ok)
         {
+            strcpy(userpath, "/Users/");
             strcat(userpath, result);
             strcat(userpath, "/local");
-            fprintf(stdout, "Change dir to: %s\n", userpath);
 
-            // TODO: Keep a list of open fds???
-            close(settings.mntsrc_fd);
-            int fd = open(userpath, O_RDONLY);
-            settings.mntsrc_fd = fd;
-            if (fchdir(fd) != 0)
-            {
-                fprintf(
-                    stderr,
-                    "Could not change working directory to '%s': %s\n",
-                    settings.mntsrc,
-                    strerror(errno));
-                fuse_exit(fuse_get_context()->fuse);
-            }
+            // Record this in the settings
+            strcpy(settings.root_dest, userpath);
+
+            // Add the rest of the path
+            strcat(userpath, path);
+
+            printf("UID: %i\nPID: %i\n", fc->uid, fc->pid);
+            //get_pid_info(fc->pid);
+            fprintf(stdout, "Processed path is: %s\n", userpath);
+
+            // Strdup necessary? I don't get C...
+            return strdup(userpath);
+        }
+        else
+        {
+            // HACK: Copy what hopefully was the last calling User location
+            // provided this was used correctly... i.e. only one user at a time
+            // can mix normal and sudo calls.
+            printf("UID: %i\n", fc->uid);
+            printf("GID: %i\nPID: %i\n", fc->gid, fc->pid);
+            get_pid_info(fc->pid);
+            fprintf(stdout, "Processed path is: %s\n", userpath);
+            fprintf(stdout, "Root destination path is: %s\n", settings.root_dest);
+            strcpy(userpath, settings.root_dest);
+            strcat(userpath, path);
+            // strcat(userpath, "hahaha");
+            fprintf(stdout, "Together destination path is: %s\n", userpath);
+            return strdup(userpath);
         }
     }
 
@@ -731,6 +760,7 @@ static void *bindfs_init()
 
     maybe_stdout_stderr_to_file();
 
+    // For normal functionality change directory to mount destination
     if (fchdir(settings.mntsrc_fd) != 0)
     {
         fprintf(
@@ -757,15 +787,39 @@ static int bindfs_getattr(const char *path, struct stat *stbuf)
     if (real_path == NULL)
         return -errno;
 
-    if (lstat(real_path, stbuf) == -1)
+    res = lstat(real_path, stbuf);
+
+    if (res == -1)
+    {
+        free(real_path);
+        return -errno;
+    }
+    free(real_path);
+    return res;
+
+    // res = getattr_common(real_path, stbuf);
+
+    // pthread_mutex_unlock(&lock);
+    return res;
+}
+
+static int bindfs_access(const char *path, int mask)
+{
+    int res;
+    char *real_path = process_path(path, false);
+
+    printf("ACCESSING FILE: %s\n", real_path);
+
+    res = access(real_path, mask);
+    if (res == -1)
     {
         free(real_path);
         return -errno;
     }
 
-    res = getattr_common(real_path, stbuf);
     free(real_path);
-    return res;
+
+    return 0;
 }
 
 static int bindfs_fgetattr(const char *path, struct stat *stbuf,
@@ -778,12 +832,14 @@ static int bindfs_fgetattr(const char *path, struct stat *stbuf,
     if (real_path == NULL)
         return -errno;
 
+    res = fstat(fi->fh, stbuf);
+
     if (fstat(fi->fh, stbuf) == -1)
     {
         free(real_path);
         return -errno;
     }
-    res = getattr_common(real_path, stbuf);
+    // res = getattr_common(real_path, stbuf);
     free(real_path);
     return res;
 }
@@ -1354,7 +1410,6 @@ static int bindfs_write(const char *path, const char *buf, size_t size,
                         off_t offset, struct fuse_file_info *fi)
 {
     int res;
-    (void)path;
     char *source_buf = (char *)buf;
 
     if (settings.write_limiter)
@@ -1394,6 +1449,7 @@ static int bindfs_write(const char *path, const char *buf, size_t size,
 static int bindfs_lock(const char *path, struct fuse_file_info *fi, int cmd,
                        struct flock *lock)
 {
+    printf("LOCK LOCK LOCK LOCK %s %i\n", path, fi->fh);
     int res = fcntl(fi->fh, cmd, lock);
     if (res == -1)
     {
@@ -1405,6 +1461,7 @@ static int bindfs_lock(const char *path, struct fuse_file_info *fi, int cmd,
 /* This callback is only installed if lock forwarding is enabled. */
 static int bindfs_flock(const char *path, struct fuse_file_info *fi, int op)
 {
+    printf("FLOCK FLOCK FLOCK FLOCK %s %i\n", path, fi->fh);
     int res = flock(fi->fh, op);
     if (res == -1)
     {
@@ -1664,7 +1721,7 @@ static struct fuse_operations bindfs_oper = {
     .destroy = bindfs_destroy,
     .getattr = bindfs_getattr,
     .fgetattr = bindfs_fgetattr,
-    /* no access() since we always use -o default_permissions */
+    .access = bindfs_access,
     .readlink = bindfs_readlink,
     .readdir = bindfs_readdir,
     .mknod = bindfs_mknod,
@@ -1948,6 +2005,7 @@ static int process_option(void *data, const char *arg, int key,
             else
             {
                 settings.mntsrc = realpath(arg, NULL);
+                settings.root_dest = realpath(arg, NULL); /* Init this too */
             }
             if (settings.mntsrc == NULL)
             {
@@ -2313,6 +2371,7 @@ static void atexit_func()
 {
     free(settings.mntsrc);
     free(settings.mntdest);
+    free(settings.root_dest);
     free(settings.original_working_dir);
     settings.original_working_dir = NULL;
     if (settings.read_limiter)
@@ -2471,6 +2530,7 @@ int main(int argc, char *argv[])
     settings.map_to_calling_user = 1; // TODO: Make an option
     settings.mntsrc = NULL;
     settings.mntdest = NULL;
+    settings.root_dest = NULL;
     settings.mntdest_len = 0;
     settings.original_working_dir = get_working_dir();
     settings.create_policy = (getuid() == 0) ? CREATE_AS_USER : CREATE_AS_MOUNTER;
@@ -2804,7 +2864,7 @@ int main(int argc, char *argv[])
     }
 
     /* We want the kernel to do our access checks for us based on what getattr gives it. */
-    fuse_opt_add_arg(&args, "-odefault_permissions");
+    // fuse_opt_add_arg(&args, "-odefault_permissions");
 
     /* We want to mirror inodes. */
     fuse_opt_add_arg(&args, "-ouse_ino");
